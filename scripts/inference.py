@@ -40,92 +40,92 @@ def main(config, args):
     print(f"Input audio path: {args.audio_path}")
     print(f"Loaded checkpoint path: {args.inference_ckpt_path}")
 
+# torch.cuda.synchronize()
+# with profile(on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler/"),
+#              record_shapes=True,
+#              profile_memory=True,
+#              with_stack=True,
+#              with_flops=True,
+#              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+#              ) as prof:
+
+#     with record_function("Warmup"):  # test
+    # Warmup to avoid profiling the first few iterations
+    torch.randn(1, 3, 224, 224).to(dtype)
     torch.cuda.synchronize()
-    with profile(on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler/"),
-                 record_shapes=True,
-                 profile_memory=True,
-                 with_stack=True,
-                 with_flops=True,
-                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                 ) as prof:
 
-        with record_function("Warmup"):  # test
-            # Warmup to avoid profiling the first few iterations
-            torch.randn(1, 3, 224, 224).to(dtype)
-            torch.cuda.synchronize()
+# with record_function("DDIMScheduler"):
+    scheduler = DDIMScheduler.from_pretrained("configs")
 
-        with record_function("DDIMScheduler"):
-            scheduler = DDIMScheduler.from_pretrained("configs")
+    if config.model.cross_attention_dim == 768:
+        whisper_model_path = "checkpoints/whisper/small.pt"
+    elif config.model.cross_attention_dim == 384:
+        whisper_model_path = "checkpoints/whisper/tiny.pt"
+    else:
+        raise NotImplementedError(
+            "cross_attention_dim must be 768 or 384")
 
-            if config.model.cross_attention_dim == 768:
-                whisper_model_path = "checkpoints/whisper/small.pt"
-            elif config.model.cross_attention_dim == 384:
-                whisper_model_path = "checkpoints/whisper/tiny.pt"
-            else:
-                raise NotImplementedError(
-                    "cross_attention_dim must be 768 or 384")
+# with record_function("Audio2Feature"):
+    audio_encoder = Audio2Feature(
+        model_path=whisper_model_path,
+        device="cuda",
+        num_frames=config.data.num_frames,
+        audio_feat_length=config.data.audio_feat_length,
+    )
 
-        with record_function("Audio2Feature"):
-            audio_encoder = Audio2Feature(
-                model_path=whisper_model_path,
-                device="cuda",
-                num_frames=config.data.num_frames,
-                audio_feat_length=config.data.audio_feat_length,
-            ).to(dtype=dtype)
+# with record_function("AutoencoderKL"):
+    vae = AutoencoderKL.from_pretrained(
+        "stabilityai/sd-vae-ft-mse", torch_dtype=dtype).to("cuda")
+    vae.config.scaling_factor = 0.18215
+    vae.config.shift_factor = 0
 
-        with record_function("AutoencoderKL"):
-            vae = AutoencoderKL.from_pretrained(
-                "stabilityai/sd-vae-ft-mse", torch_dtype=dtype).to("cuda")
-            vae.config.scaling_factor = 0.18215
-            vae.config.shift_factor = 0
+# with record_function("UNet3DConditionModel"):
+    unet, _ = UNet3DConditionModel.from_pretrained(
+        OmegaConf.to_container(config.model),
+        args.inference_ckpt_path,
+        device="cuda",
+    )  # .to(dtype=dtype)
+    unet = unet.to(dtype=dtype)
 
-        with record_function("UNet3DConditionModel"):
-            unet, _ = UNet3DConditionModel.from_pretrained(
-                OmegaConf.to_container(config.model),
-                args.inference_ckpt_path,
-                device="cuda",
-            ).to(dtype=dtype)
-            # unet = unet.to(dtype=dtype)
+# with record_function("UNet3DConditionModel"):
+    pipeline = LipsyncPipeline(
+        vae=vae,
+        audio_encoder=audio_encoder,
+        unet=unet,
+        scheduler=scheduler,
+    ).to("cuda").to(dtype=dtype)
 
-        with record_function("UNet3DConditionModel"):
-            pipeline = LipsyncPipeline(
-                vae=vae,
-                audio_encoder=audio_encoder,
-                unet=unet,
-                scheduler=scheduler,
-            ).to("cuda").to(dtype=dtype)
+# with record_function("DeepCacheSDHelper"):
 
-        with record_function("DeepCacheSDHelper"):
+    # use DeepCache
+    if args.enable_deepcache:
+        helper = DeepCacheSDHelper(pipe=pipeline)
+        helper.set_params(cache_interval=3, cache_branch_id=0)
+        helper.enable()
 
-            # use DeepCache
-            if args.enable_deepcache:
-                helper = DeepCacheSDHelper(pipe=pipeline)
-                helper.set_params(cache_interval=3, cache_branch_id=0)
-                helper.enable()
+    if args.seed != -1:
+        set_seed(args.seed)
+    else:
+        torch.seed()
 
-            if args.seed != -1:
-                set_seed(args.seed)
-            else:
-                torch.seed()
+# with record_function("pipeline"):
+    print(f"Initial seed: {torch.initial_seed()}")
+    pipeline(
+        video_path=args.video_path,
+        audio_path=args.audio_path,
+        video_out_path=args.video_out_path,
+        num_frames=config.data.num_frames,
+        num_inference_steps=args.inference_steps,
+        guidance_scale=args.guidance_scale,
+        weight_dtype=dtype,
+        width=config.data.resolution,
+        height=config.data.resolution,
+        mask_image_path=config.data.mask_image_path,
+        temp_dir=args.temp_dir,
+    )
 
-        with record_function("pipeline"):
-            print(f"Initial seed: {torch.initial_seed()}")
-            pipeline(
-                video_path=args.video_path,
-                audio_path=args.audio_path,
-                video_out_path=args.video_out_path,
-                num_frames=config.data.num_frames,
-                num_inference_steps=args.inference_steps,
-                guidance_scale=args.guidance_scale,
-                weight_dtype=dtype,
-                width=config.data.resolution,
-                height=config.data.resolution,
-                mask_image_path=config.data.mask_image_path,
-                temp_dir=args.temp_dir,
-            )
-
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
-    prof.export_chrome_trace("pipeline_trace.json")
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+    # prof.export_chrome_trace("pipeline_trace.json")
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 

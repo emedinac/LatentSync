@@ -36,6 +36,7 @@ from ..utils.image_processor import ImageProcessor, load_fixed_mask
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
+from torch.profiler import profile, record_function, ProfilerActivity
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -359,164 +360,191 @@ class LipsyncPipeline(DiffusionPipeline):
         callback_steps: Optional[int] = 1,
         **kwargs,
     ):
-        is_train = self.unet.training
-        self.unet.eval()
+        torch.cuda.synchronize()
+        with profile(on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler/"),
+                     record_shapes=True,
+                     profile_memory=True,
+                     with_stack=True,
+                     with_flops=True,
+                     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                     ) as prof:
 
-        check_ffmpeg_installed()
+            with record_function("init"):
+                is_train = self.unet.training
+                self.unet.eval()
 
-        # 0. Define call parameters
-        device = self._execution_device
-        mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(
-            height, device="cuda", mask_image=mask_image)
-        self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
+                check_ffmpeg_installed()
+            with record_function("0_define_call_parameters"):
+                # 0. Define call parameters
+                device = self._execution_device
+                mask_image = load_fixed_mask(height, mask_image_path)
+                self.image_processor = ImageProcessor(
+                    height, device="cuda", mask_image=mask_image)
+                self.set_progress_bar_config(
+                    desc=f"Sample frames: {num_frames}")
+            with record_function("1_default_height_and_width"):
+                # 1. Default height and width to unet
+                height = height or self.unet.config.sample_size * self.vae_scale_factor
+                width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        # 1. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+            with record_function("2_check_inputs"):
+                # 2. Check inputs
+                self.check_inputs(height, width, callback_steps)
 
-        # 2. Check inputs
-        self.check_inputs(height, width, callback_steps)
+                # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+                # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+                # corresponds to doing no classifier free guidance.
+                do_classifier_free_guidance = guidance_scale > 1.0
 
-        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-        # corresponds to doing no classifier free guidance.
-        do_classifier_free_guidance = guidance_scale > 1.0
+            with record_function("3_set_timesteps"):
+                # 3. set timesteps
+                self.scheduler.set_timesteps(
+                    num_inference_steps, device=device)
+                timesteps = self.scheduler.timesteps
 
-        # 3. set timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
+            with record_function("4_prepare_extra_step"):
+                # 4. Prepare extra step kwargs.
+                extra_step_kwargs = self.prepare_extra_step_kwargs(
+                    generator, eta)
 
-        # 4. Prepare extra step kwargs.
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+                whisper_feature = self.audio_encoder.audio2feat(audio_path)
+                whisper_chunks = self.audio_encoder.feature2chunks(
+                    feature_array=whisper_feature, fps=video_fps)
 
-        whisper_feature = self.audio_encoder.audio2feat(audio_path)
-        whisper_chunks = self.audio_encoder.feature2chunks(
-            feature_array=whisper_feature, fps=video_fps)
+                audio_samples = read_audio(audio_path)
+                video_frames = read_video(video_path, use_decord=False)
 
-        audio_samples = read_audio(audio_path)
-        video_frames = read_video(video_path, use_decord=False)
+                video_frames, faces, boxes, affine_matrices = self.loop_video(
+                    whisper_chunks, video_frames)
 
-        video_frames, faces, boxes, affine_matrices = self.loop_video(
-            whisper_chunks, video_frames)
+                synced_video_frames = []
 
-        synced_video_frames = []
+                num_channels_latents = self.vae.config.latent_channels
 
-        num_channels_latents = self.vae.config.latent_channels
+                # Prepare latent variables
+                all_latents = self.prepare_latents(
+                    len(whisper_chunks),
+                    num_channels_latents,
+                    height,
+                    width,
+                    weight_dtype,
+                    device,
+                    generator,
+                )
 
-        # Prepare latent variables
-        all_latents = self.prepare_latents(
-            len(whisper_chunks),
-            num_channels_latents,
-            height,
-            width,
-            weight_dtype,
-            device,
-            generator,
-        )
+            with record_function("loop_inference"):
+                num_inferences = math.ceil(len(whisper_chunks) / num_frames)
+                for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+                    with record_function("loop_inference_init"):
+                        if self.unet.add_audio_layer:
+                            audio_embeds = torch.stack(
+                                whisper_chunks[i * num_frames: (i + 1) * num_frames])
+                            audio_embeds = audio_embeds.to(
+                                device, dtype=weight_dtype)
+                            if do_classifier_free_guidance:
+                                null_audio_embeds = torch.zeros_like(
+                                    audio_embeds)
+                                audio_embeds = torch.cat(
+                                    [null_audio_embeds, audio_embeds])
+                        else:
+                            audio_embeds = None
+                        inference_faces = faces[i *
+                                                num_frames: (i + 1) * num_frames]
+                        latents = all_latents[:, :, i *
+                                              num_frames: (i + 1) * num_frames]
+                        ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
+                            inference_faces, affine_transform=False
+                        )
+                    with record_function("7_prepare_mask_latents"):
+                        # 7. Prepare mask latent variables
+                        mask_latents, masked_image_latents = self.prepare_mask_latents(
+                            masks,
+                            masked_pixel_values,
+                            height,
+                            width,
+                            weight_dtype,
+                            device,
+                            generator,
+                            do_classifier_free_guidance,
+                        )
+                    with record_function("8_prepare_image_latents"):
+                        # 8. Prepare image latents
+                        ref_latents = self.prepare_image_latents(
+                            ref_pixel_values,
+                            device,
+                            weight_dtype,
+                            generator,
+                            do_classifier_free_guidance,
+                        )
+                    with record_function("9_denoising_loop"):
+                        # 9. Denoising loop
+                        num_warmup_steps = len(timesteps) - \
+                            num_inference_steps * self.scheduler.order
+                        with self.progress_bar(total=num_inference_steps) as progress_bar:
+                            for j, t in enumerate(timesteps):
+                                # expand the latents if we are doing classifier free guidance
+                                unet_input = torch.cat(
+                                    [latents] * 2) if do_classifier_free_guidance else latents
 
-        num_inferences = math.ceil(len(whisper_chunks) / num_frames)
-        for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-            if self.unet.add_audio_layer:
-                audio_embeds = torch.stack(
-                    whisper_chunks[i * num_frames: (i + 1) * num_frames])
-                audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
-                if do_classifier_free_guidance:
-                    null_audio_embeds = torch.zeros_like(audio_embeds)
-                    audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
-            else:
-                audio_embeds = None
-            inference_faces = faces[i * num_frames: (i + 1) * num_frames]
-            latents = all_latents[:, :, i * num_frames: (i + 1) * num_frames]
-            ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
-                inference_faces, affine_transform=False
-            )
+                                unet_input = self.scheduler.scale_model_input(
+                                    unet_input, t)
 
-            # 7. Prepare mask latent variables
-            mask_latents, masked_image_latents = self.prepare_mask_latents(
-                masks,
-                masked_pixel_values,
-                height,
-                width,
-                weight_dtype,
-                device,
-                generator,
-                do_classifier_free_guidance,
-            )
+                                # concat latents, mask, masked_image_latents in the channel dimension
+                                unet_input = torch.cat(
+                                    [unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
 
-            # 8. Prepare image latents
-            ref_latents = self.prepare_image_latents(
-                ref_pixel_values,
-                device,
-                weight_dtype,
-                generator,
-                do_classifier_free_guidance,
-            )
+                                # predict the noise residual
+                                noise_pred = self.unet(
+                                    unet_input, t, encoder_hidden_states=audio_embeds).sample
 
-            # 9. Denoising loop
-            num_warmup_steps = len(timesteps) - \
-                num_inference_steps * self.scheduler.order
-            with self.progress_bar(total=num_inference_steps) as progress_bar:
-                for j, t in enumerate(timesteps):
-                    # expand the latents if we are doing classifier free guidance
-                    unet_input = torch.cat(
-                        [latents] * 2) if do_classifier_free_guidance else latents
+                                # perform guidance
+                                if do_classifier_free_guidance:
+                                    noise_pred_uncond, noise_pred_audio = noise_pred.chunk(
+                                        2)
+                                    noise_pred = noise_pred_uncond + guidance_scale * \
+                                        (noise_pred_audio - noise_pred_uncond)
 
-                    unet_input = self.scheduler.scale_model_input(
-                        unet_input, t)
+                                # compute the previous noisy sample x_t -> x_t-1
+                                latents = self.scheduler.step(
+                                    noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-                    # concat latents, mask, masked_image_latents in the channel dimension
-                    unet_input = torch.cat(
-                        [unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
+                                # call the callback, if provided
+                                if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
+                                    progress_bar.update()
+                                    if callback is not None and j % callback_steps == 0:
+                                        callback(j, t, latents)
+                        prof.step()
+                    with record_function("10_recover_pixel_values"):
+                        # Recover the pixel values
+                        decoded_latents = self.decode_latents(latents)
+                        decoded_latents = self.paste_surrounding_pixels_back(
+                            decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
+                        )
+                        synced_video_frames.append(decoded_latents)
+                    prof.step()
+            with record_function("ending_1"):
+                synced_video_frames = self.restore_video(
+                    torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
 
-                    # predict the noise residual
-                    noise_pred = self.unet(
-                        unet_input, t, encoder_hidden_states=audio_embeds).sample
+                audio_samples_remain_length = int(
+                    synced_video_frames.shape[0] / video_fps * audio_sample_rate)
+                audio_samples = audio_samples[:audio_samples_remain_length].cpu(
+                ).numpy()
 
-                    # perform guidance
-                    if do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_audio = noise_pred.chunk(
-                            2)
-                        noise_pred = noise_pred_uncond + guidance_scale * \
-                            (noise_pred_audio - noise_pred_uncond)
+            with record_function("ending_2"):
+                if is_train:
+                    self.unet.train()
 
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents = self.scheduler.step(
-                        noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                os.makedirs(temp_dir, exist_ok=True)
 
-                    # call the callback, if provided
-                    if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
-                        progress_bar.update()
-                        if callback is not None and j % callback_steps == 0:
-                            callback(j, t, latents)
+                write_video(os.path.join(temp_dir, "video.mp4"),
+                            synced_video_frames, fps=video_fps)
 
-            # Recover the pixel values
-            decoded_latents = self.decode_latents(latents)
-            decoded_latents = self.paste_surrounding_pixels_back(
-                decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
-            )
-            synced_video_frames.append(decoded_latents)
+                sf.write(os.path.join(temp_dir, "audio.wav"),
+                         audio_samples, audio_sample_rate)
 
-        synced_video_frames = self.restore_video(
-            torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
-
-        audio_samples_remain_length = int(
-            synced_video_frames.shape[0] / video_fps * audio_sample_rate)
-        audio_samples = audio_samples[:audio_samples_remain_length].cpu(
-        ).numpy()
-
-        if is_train:
-            self.unet.train()
-
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        write_video(os.path.join(temp_dir, "video.mp4"),
-                    synced_video_frames, fps=video_fps)
-
-        sf.write(os.path.join(temp_dir, "audio.wav"),
-                 audio_samples, audio_sample_rate)
-
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        subprocess.run(command, shell=True)
+            command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
+            subprocess.run(command, shell=True)
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
