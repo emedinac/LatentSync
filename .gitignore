@@ -1,5 +1,6 @@
 # PyCharm files
 .idea/
+checkpoints/
 
 # macOS dir files
 .DS_Store
