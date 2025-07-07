@@ -336,7 +336,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         return video_frames, faces, boxes, affine_matrices
 
-    @torch.no_grad()
+    @torch.inference_model()
     def __call__(
         self,
         video_path: str,
@@ -362,10 +362,6 @@ class LipsyncPipeline(DiffusionPipeline):
     ):
         torch.cuda.synchronize()
         with profile(on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler/"),
-                     record_shapes=True,
-                     profile_memory=True,
-                     with_stack=True,
-                     with_flops=True,
                      activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                      ) as prof:
 
@@ -432,56 +428,56 @@ class LipsyncPipeline(DiffusionPipeline):
                     generator,
                 )
 
-            with record_function("loop_inference"):
-                num_inferences = math.ceil(len(whisper_chunks) / num_frames)
-                for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-                    with record_function("loop_inference_init"):
-                        if self.unet.add_audio_layer:
-                            audio_embeds = torch.stack(
-                                whisper_chunks[i * num_frames: (i + 1) * num_frames])
-                            audio_embeds = audio_embeds.to(
-                                device, dtype=weight_dtype)
-                            if do_classifier_free_guidance:
-                                null_audio_embeds = torch.zeros_like(
-                                    audio_embeds)
-                                audio_embeds = torch.cat(
-                                    [null_audio_embeds, audio_embeds])
-                        else:
-                            audio_embeds = None
-                        inference_faces = faces[i *
-                                                num_frames: (i + 1) * num_frames]
-                        latents = all_latents[:, :, i *
-                                              num_frames: (i + 1) * num_frames]
-                        ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
-                            inference_faces, affine_transform=False
-                        )
-                    with record_function("7_prepare_mask_latents"):
-                        # 7. Prepare mask latent variables
-                        mask_latents, masked_image_latents = self.prepare_mask_latents(
-                            masks,
-                            masked_pixel_values,
-                            height,
-                            width,
-                            weight_dtype,
-                            device,
-                            generator,
-                            do_classifier_free_guidance,
-                        )
-                    with record_function("8_prepare_image_latents"):
-                        # 8. Prepare image latents
-                        ref_latents = self.prepare_image_latents(
-                            ref_pixel_values,
-                            device,
-                            weight_dtype,
-                            generator,
-                            do_classifier_free_guidance,
-                        )
-                    with record_function("9_denoising_loop"):
-                        # 9. Denoising loop
-                        num_warmup_steps = len(timesteps) - \
-                            num_inference_steps * self.scheduler.order
-                        with self.progress_bar(total=num_inference_steps) as progress_bar:
-                            for j, t in enumerate(timesteps):
+            num_inferences = math.ceil(len(whisper_chunks) / num_frames)
+            for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+                with record_function("loop_inference_init"):
+                    if self.unet.add_audio_layer:
+                        audio_embeds = torch.stack(
+                            whisper_chunks[i * num_frames: (i + 1) * num_frames])
+                        audio_embeds = audio_embeds.to(
+                            device, dtype=weight_dtype)
+                        if do_classifier_free_guidance:
+                            null_audio_embeds = torch.zeros_like(
+                                audio_embeds)
+                            audio_embeds = torch.cat(
+                                [null_audio_embeds, audio_embeds])
+                    else:
+                        audio_embeds = None
+                    inference_faces = faces[i *
+                                            num_frames: (i + 1) * num_frames]
+                    latents = all_latents[:, :, i *
+                                          num_frames: (i + 1) * num_frames]
+                    ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
+                        inference_faces, affine_transform=False
+                    )
+                with record_function("7_prepare_mask_latents"):
+                    # 7. Prepare mask latent variables
+                    mask_latents, masked_image_latents = self.prepare_mask_latents(
+                        masks,
+                        masked_pixel_values,
+                        height,
+                        width,
+                        weight_dtype,
+                        device,
+                        generator,
+                        do_classifier_free_guidance,
+                    )
+                with record_function("8_prepare_image_latents"):
+                    # 8. Prepare image latents
+                    ref_latents = self.prepare_image_latents(
+                        ref_pixel_values,
+                        device,
+                        weight_dtype,
+                        generator,
+                        do_classifier_free_guidance,
+                    )
+                with record_function("9_denoising_loop"):
+                    # 9. Denoising loop
+                    num_warmup_steps = len(timesteps) - \
+                        num_inference_steps * self.scheduler.order
+                    with self.progress_bar(total=num_inference_steps) as progress_bar:
+                        for j, t in enumerate(timesteps):
+                            with record_function("9.1_expand_latents"):
                                 # expand the latents if we are doing classifier free guidance
                                 unet_input = torch.cat(
                                     [latents] * 2) if do_classifier_free_guidance else latents
@@ -489,14 +485,17 @@ class LipsyncPipeline(DiffusionPipeline):
                                 unet_input = self.scheduler.scale_model_input(
                                     unet_input, t)
 
+                            with record_function("9.2_concat_latents"):
                                 # concat latents, mask, masked_image_latents in the channel dimension
                                 unet_input = torch.cat(
                                     [unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
 
+                            with record_function("9.3_predict_noise_residual"):
                                 # predict the noise residual
                                 noise_pred = self.unet(
                                     unet_input, t, encoder_hidden_states=audio_embeds).sample
 
+                            with record_function("9.4_perform_guidance"):
                                 # perform guidance
                                 if do_classifier_free_guidance:
                                     noise_pred_uncond, noise_pred_audio = noise_pred.chunk(
@@ -504,24 +503,27 @@ class LipsyncPipeline(DiffusionPipeline):
                                     noise_pred = noise_pred_uncond + guidance_scale * \
                                         (noise_pred_audio - noise_pred_uncond)
 
+                            with record_function("9.4_compute_previous_sample"):
                                 # compute the previous noisy sample x_t -> x_t-1
                                 latents = self.scheduler.step(
                                     noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
+                            with record_function("9.5_update_progress_bar"):
                                 # call the callback, if provided
                                 if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
                                     progress_bar.update()
                                     if callback is not None and j % callback_steps == 0:
                                         callback(j, t, latents)
-                        prof.step()
-                    with record_function("10_recover_pixel_values"):
-                        # Recover the pixel values
-                        decoded_latents = self.decode_latents(latents)
-                        decoded_latents = self.paste_surrounding_pixels_back(
-                            decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
-                        )
-                        synced_video_frames.append(decoded_latents)
+                            prof.step()
                     prof.step()
+                with record_function("10_recover_pixel_values"):
+                    # Recover the pixel values
+                    decoded_latents = self.decode_latents(latents)
+                    decoded_latents = self.paste_surrounding_pixels_back(
+                        decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
+                    )
+                    synced_video_frames.append(decoded_latents)
+                prof.step()
             with record_function("ending_1"):
                 synced_video_frames = self.restore_video(
                     torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
