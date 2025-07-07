@@ -336,7 +336,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         return video_frames, faces, boxes, affine_matrices
 
-    @torch.inference_model()
+    @torch.no_grad()
     def __call__(
         self,
         video_path: str,

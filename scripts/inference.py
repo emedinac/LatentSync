@@ -110,19 +110,20 @@ def main(config, args):
 
 # with record_function("pipeline"):
     print(f"Initial seed: {torch.initial_seed()}")
-    pipeline(
-        video_path=args.video_path,
-        audio_path=args.audio_path,
-        video_out_path=args.video_out_path,
-        num_frames=config.data.num_frames,
-        num_inference_steps=args.inference_steps,
-        guidance_scale=args.guidance_scale,
-        weight_dtype=dtype,
-        width=config.data.resolution,
-        height=config.data.resolution,
-        mask_image_path=config.data.mask_image_path,
-        temp_dir=args.temp_dir,
-    )
+    with torch.inference_mode():
+        pipeline(
+            video_path=args.video_path,
+            audio_path=args.audio_path,
+            video_out_path=args.video_out_path,
+            num_frames=config.data.num_frames,
+            num_inference_steps=args.inference_steps,
+            guidance_scale=args.guidance_scale,
+            weight_dtype=dtype,
+            width=config.data.resolution,
+            height=config.data.resolution,
+            mask_image_path=config.data.mask_image_path,
+            temp_dir=args.temp_dir,
+        )
 
     # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
     # prof.export_chrome_trace("pipeline_trace.json")
