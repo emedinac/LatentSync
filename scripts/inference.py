@@ -71,11 +71,11 @@ def main(config, args):
                 device="cuda",
                 num_frames=config.data.num_frames,
                 audio_feat_length=config.data.audio_feat_length,
-            )
+            ).to(dtype=dtype)
 
         with record_function("AutoencoderKL"):
             vae = AutoencoderKL.from_pretrained(
-                "stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
+                "stabilityai/sd-vae-ft-mse", torch_dtype=dtype).to("cuda")
             vae.config.scaling_factor = 0.18215
             vae.config.shift_factor = 0
 
@@ -83,9 +83,9 @@ def main(config, args):
             unet, _ = UNet3DConditionModel.from_pretrained(
                 OmegaConf.to_container(config.model),
                 args.inference_ckpt_path,
-                device="cpu",
-            )
-            unet = unet.to(dtype=dtype)
+                device="cuda",
+            ).to(dtype=dtype)
+            # unet = unet.to(dtype=dtype)
 
         with record_function("UNet3DConditionModel"):
             pipeline = LipsyncPipeline(
@@ -93,7 +93,7 @@ def main(config, args):
                 audio_encoder=audio_encoder,
                 unet=unet,
                 scheduler=scheduler,
-            ).to("cuda")
+            ).to("cuda").to(dtype=dtype)
 
         with record_function("DeepCacheSDHelper"):
 
