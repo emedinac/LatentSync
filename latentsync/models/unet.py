@@ -29,6 +29,7 @@ from .utils import zero_module
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 # must be added to avoid torch dynamo error
+# https://docs.pytorch.org/docs/stable/torch.compiler_dynamo_overview.html
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.recompile_limit = 100
 
