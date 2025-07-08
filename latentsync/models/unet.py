@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 import copy
-from torch.cuda.amp import autocast
 
 import torch
 import torch.nn as nn
@@ -240,11 +239,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.conv_act = nn.SiLU()
 
         self.conv_out = zero_module(InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1))
-        # Optimize model: Set to channels_last_3d and compile
-        self.to(memory_format=torch.channels_last_3d)
-        # Enable sliced attention for memory efficiency
-        self.set_attention_slice("auto")
-        self._compiled = False
 
     def set_attention_slice(self, slice_size):
         r"""
@@ -315,6 +309,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         if isinstance(module, (CrossAttnDownBlock3D, DownBlock3D, CrossAttnUpBlock3D, UpBlock3D)):
             module.gradient_checkpointing = value
 
+    @torch.compile()
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -340,145 +335,141 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             [`~models.unet_2d_condition.UNet2DConditionOutput`] if `return_dict` is True, otherwise a `tuple`. When
             returning a tuple, the first element is the sample tensor.
         """
-        if not self._compiled and torch.cuda.is_available(): # check compilation
-            self._compiled = True
-            self = torch.compile(self, mode="max-autotune", fullgraph=True)
-        with autocast():
-            # By default samples have to be AT least a multiple of the overall upsampling factor.
-            # The overall upsampling factor is equal to 2 ** (# num of upsampling layears).
-            # However, the upsampling interpolation output size can be forced to fit any upsampling size
-            # on the fly if necessary.
-            default_overall_up_factor = 2**self.num_upsamplers
+        # By default samples have to be AT least a multiple of the overall upsampling factor.
+        # The overall upsampling factor is equal to 2 ** (# num of upsampling layears).
+        # However, the upsampling interpolation output size can be forced to fit any upsampling size
+        # on the fly if necessary.
+        default_overall_up_factor = 2**self.num_upsamplers
 
-            # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`
-            forward_upsample_size = False
-            upsample_size = None
+        # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`
+        forward_upsample_size = False
+        upsample_size = None
 
-            if any(s % default_overall_up_factor != 0 for s in sample.shape[-2:]):
-                logger.info("Forward upsample size to force interpolation output size.")
-                forward_upsample_size = True
+        if any(s % default_overall_up_factor != 0 for s in sample.shape[-2:]):
+            logger.info("Forward upsample size to force interpolation output size.")
+            forward_upsample_size = True
 
-            # prepare attention_mask
-            if attention_mask is not None:
-                attention_mask = (1 - attention_mask.to(sample.dtype)) * -10000.0
-                attention_mask = attention_mask.unsqueeze(1)
+        # prepare attention_mask
+        if attention_mask is not None:
+            attention_mask = (1 - attention_mask.to(sample.dtype)) * -10000.0
+            attention_mask = attention_mask.unsqueeze(1)
 
-            # center input if necessary
-            if self.config.center_input_sample:
-                sample = 2 * sample - 1.0
+        # center input if necessary
+        if self.config.center_input_sample:
+            sample = 2 * sample - 1.0
 
-            # time
-            timesteps = timestep
-            if not torch.is_tensor(timesteps):
-                # This would be a good case for the `match` statement (Python 3.10+)
-                is_mps = sample.device.type == "mps"
-                if isinstance(timestep, float):
-                    dtype = torch.float32 if is_mps else torch.float64
-                else:
-                    dtype = torch.int32 if is_mps else torch.int64
-                timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
-            elif len(timesteps.shape) == 0:
-                timesteps = timesteps[None].to(sample.device)
+        # time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = sample.device.type == "mps"
+            if isinstance(timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
+            else:
+                dtype = torch.int32 if is_mps else torch.int64
+            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
+        elif len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
 
-            # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-            timesteps = timesteps.expand(sample.shape[0])
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps.expand(sample.shape[0])
 
-            t_emb = self.time_proj(timesteps)
+        t_emb = self.time_proj(timesteps)
 
-            # timesteps does not contain any weights and will always return f32 tensors
-            # but time_embedding might actually be running in fp16. so we need to cast here.
-            # there might be better ways to encapsulate this.
-            t_emb = t_emb.to(dtype=self.dtype)
-            emb = self.time_embedding(t_emb)
+        # timesteps does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        t_emb = t_emb.to(dtype=self.dtype)
+        emb = self.time_embedding(t_emb)
 
-            if self.class_embedding is not None:
-                if class_labels is None:
-                    raise ValueError("class_labels should be provided when num_class_embeds > 0")
+        if self.class_embedding is not None:
+            if class_labels is None:
+                raise ValueError("class_labels should be provided when num_class_embeds > 0")
 
-                if self.config.class_embed_type == "timestep":
-                    class_labels = self.time_proj(class_labels)
+            if self.config.class_embed_type == "timestep":
+                class_labels = self.time_proj(class_labels)
 
-                class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
-                emb = emb + class_emb
+            class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
+            emb = emb + class_emb
 
-            # pre-process
-            sample = self.conv_in(sample)
+        # pre-process
+        sample = self.conv_in(sample)
 
-            # down
-            down_block_res_samples = (sample,)
-            for downsample_block in self.down_blocks:
-                if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                    sample, res_samples = downsample_block(
-                        hidden_states=sample,
-                        temb=emb,
-                        encoder_hidden_states=encoder_hidden_states,
-                        attention_mask=attention_mask,
-                    )
-                else:
-                    sample, res_samples = downsample_block(
-                        hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states
-                    )
+        # down
+        down_block_res_samples = (sample,)
+        for downsample_block in self.down_blocks:
+            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
+                sample, res_samples = downsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=attention_mask,
+                )
+            else:
+                sample, res_samples = downsample_block(
+                    hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states
+                )
 
-                down_block_res_samples += res_samples
+            down_block_res_samples += res_samples
 
-            # support controlnet
-            down_block_res_samples = list(down_block_res_samples)
-            if down_block_additional_residuals is not None:
-                for i, down_block_additional_residual in enumerate(down_block_additional_residuals):
-                    if down_block_additional_residual.dim() == 4:  # boardcast
-                        down_block_additional_residual = down_block_additional_residual.unsqueeze(2)
-                    down_block_res_samples[i] = down_block_res_samples[i] + down_block_additional_residual
+        # support controlnet
+        down_block_res_samples = list(down_block_res_samples)
+        if down_block_additional_residuals is not None:
+            for i, down_block_additional_residual in enumerate(down_block_additional_residuals):
+                if down_block_additional_residual.dim() == 4:  # boardcast
+                    down_block_additional_residual = down_block_additional_residual.unsqueeze(2)
+                down_block_res_samples[i] = down_block_res_samples[i] + down_block_additional_residual
 
-            # mid
-            sample = self.mid_block(
-                sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
-            )
+        # mid
+        sample = self.mid_block(
+            sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+        )
 
-            # support controlnet
-            if mid_block_additional_residual is not None:
-                if mid_block_additional_residual.dim() == 4:  # boardcast
-                    mid_block_additional_residual = mid_block_additional_residual.unsqueeze(2)
-                sample = sample + mid_block_additional_residual
+        # support controlnet
+        if mid_block_additional_residual is not None:
+            if mid_block_additional_residual.dim() == 4:  # boardcast
+                mid_block_additional_residual = mid_block_additional_residual.unsqueeze(2)
+            sample = sample + mid_block_additional_residual
 
-            # up
-            for i, upsample_block in enumerate(self.up_blocks):
-                is_final_block = i == len(self.up_blocks) - 1
+        # up
+        for i, upsample_block in enumerate(self.up_blocks):
+            is_final_block = i == len(self.up_blocks) - 1
 
-                res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-                down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+            res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
+            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
-                # if we have not reached the final block and need to forward the
-                # upsample size, we do it here
-                if not is_final_block and forward_upsample_size:
-                    upsample_size = down_block_res_samples[-1].shape[2:]
+            # if we have not reached the final block and need to forward the
+            # upsample size, we do it here
+            if not is_final_block and forward_upsample_size:
+                upsample_size = down_block_res_samples[-1].shape[2:]
 
-                if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                    sample = upsample_block(
-                        hidden_states=sample,
-                        temb=emb,
-                        res_hidden_states_tuple=res_samples,
-                        encoder_hidden_states=encoder_hidden_states,
-                        upsample_size=upsample_size,
-                        attention_mask=attention_mask,
-                    )
-                else:
-                    sample = upsample_block(
-                        hidden_states=sample,
-                        temb=emb,
-                        res_hidden_states_tuple=res_samples,
-                        upsample_size=upsample_size,
-                        encoder_hidden_states=encoder_hidden_states,
-                    )
+            if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                sample = upsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    res_hidden_states_tuple=res_samples,
+                    encoder_hidden_states=encoder_hidden_states,
+                    upsample_size=upsample_size,
+                    attention_mask=attention_mask,
+                )
+            else:
+                sample = upsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    res_hidden_states_tuple=res_samples,
+                    upsample_size=upsample_size,
+                    encoder_hidden_states=encoder_hidden_states,
+                )
 
-            # post-process
-            sample = self.conv_norm_out(sample)
-            sample = self.conv_act(sample)
-            sample = self.conv_out(sample)
+        # post-process
+        sample = self.conv_norm_out(sample)
+        sample = self.conv_act(sample)
+        sample = self.conv_out(sample)
 
-            if not return_dict:
-                return (sample,)
+        if not return_dict:
+            return (sample,)
 
-            return UNet3DConditionOutput(sample=sample)
+        return UNet3DConditionOutput(sample=sample)
 
     def load_state_dict(self, state_dict, strict=True):
         # If the loaded checkpoint's in_channels or out_channels are different from config

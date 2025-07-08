@@ -40,7 +40,7 @@ def main(config, args):
     print(f"Input audio path: {args.audio_path}")
     print(f"Loaded checkpoint path: {args.inference_ckpt_path}")
 
-# torch.cuda.synchronize()
+# torch.cuda.synchronize() # just left for the sake of documentation
 # with profile(on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler/"),
 #              record_shapes=True,
 #              profile_memory=True,
@@ -49,12 +49,12 @@ def main(config, args):
 #              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
 #              ) as prof:
 
-#     with record_function("Warmup"):  # test
+#     with record_function("Warmup"):  # test # just left for the sake of documentation
     # Warmup to avoid profiling the first few iterations
-    torch.randn(1, 3, 224, 224).to(dtype)
-    torch.cuda.synchronize()
+    # torch.randn(1, 3, 224, 224).to(dtype)
+    # torch.cuda.synchronize()
 
-# with record_function("DDIMScheduler"):
+# with record_function("DDIMScheduler"): # just left for the sake of documentation
     scheduler = DDIMScheduler.from_pretrained("configs")
 
     if config.model.cross_attention_dim == 768:
@@ -65,7 +65,7 @@ def main(config, args):
         raise NotImplementedError(
             "cross_attention_dim must be 768 or 384")
 
-# with record_function("Audio2Feature"):
+# with record_function("Audio2Feature"): # just left for the sake of documentation
     audio_encoder = Audio2Feature(
         model_path=whisper_model_path,
         device="cuda",
@@ -73,21 +73,21 @@ def main(config, args):
         audio_feat_length=config.data.audio_feat_length,
     )
 
-# with record_function("AutoencoderKL"):
+# with record_function("AutoencoderKL"): # just left for the sake of documentation
     vae = AutoencoderKL.from_pretrained(
         "stabilityai/sd-vae-ft-mse", torch_dtype=dtype).to("cuda")
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
 
-# with record_function("UNet3DConditionModel"):
+# with record_function("UNet3DConditionModel"): # just left for the sake of documentation
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
-        device="cuda",
+        device="cuda",  # to cuda directly
     )  # .to(dtype=dtype)
     unet = unet.to(dtype=dtype)
 
-# with record_function("UNet3DConditionModel"):
+# with record_function("UNet3DConditionModel"): # just left for the sake of documentation
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
@@ -95,7 +95,7 @@ def main(config, args):
         scheduler=scheduler,
     ).to("cuda").to(dtype=dtype)
 
-# with record_function("DeepCacheSDHelper"):
+# with record_function("DeepCacheSDHelper"): # just left for the sake of documentation
 
     # use DeepCache
     if args.enable_deepcache:
@@ -108,7 +108,7 @@ def main(config, args):
     else:
         torch.seed()
 
-# with record_function("pipeline"):
+# with record_function("pipeline"): # just left for the sake of documentation
     print(f"Initial seed: {torch.initial_seed()}")
     with torch.inference_mode():
         pipeline(
