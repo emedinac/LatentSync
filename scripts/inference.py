@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import types
 from omegaconf import OmegaConf
 import torch
 from diffusers import AutoencoderKL, DDIMScheduler
@@ -21,6 +22,7 @@ from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
+
 from DeepCache import DeepCacheSDHelper
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -87,6 +89,13 @@ def main(config, args):
     )  # .to(dtype=dtype)
     unet = unet.to(dtype=dtype)
 
+    
+    if hasattr(unet, 'forward') and isinstance(unet.forward, types.MethodType):
+        forward_func = unet.forward.__func__
+        if 'torch' not in forward_func.__globals__:
+            forward_func.__globals__['torch'] = torch
+            print("✅ Patched `unet.forward` globals to include torch (DeepCache fix)")
+
 # with record_function("UNet3DConditionModel"): # just left for the sake of documentation
     pipeline = LipsyncPipeline(
         vae=vae,
@@ -110,6 +119,7 @@ def main(config, args):
 
 # with record_function("pipeline"): # just left for the sake of documentation
     print(f"Initial seed: {torch.initial_seed()}")
+    # Profiler was not consider since, of course, it takes 99% of the time.
     with torch.inference_mode():
         pipeline(
             video_path=args.video_path,

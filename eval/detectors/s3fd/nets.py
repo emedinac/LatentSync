@@ -18,10 +18,12 @@ class L2Norm(nn.Module):
     def reset_parameters(self):
         init.constant_(self.weight, self.gamma)
 
+    @torch.compile()
     def forward(self, x):
         norm = x.pow(2).sum(dim=1, keepdim=True).sqrt() + self.eps
         x = torch.div(x, norm)
-        out = self.weight.unsqueeze(0).unsqueeze(2).unsqueeze(3).expand_as(x) * x
+        out = self.weight.unsqueeze(0).unsqueeze(
+            2).unsqueeze(3).expand_as(x) * x
         return out
 
 
@@ -43,7 +45,7 @@ class S3FDNet(nn.Module):
             nn.Conv2d(128, 128, 3, 1, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
-            
+
             nn.Conv2d(128, 256, 3, 1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, 256, 3, 1, padding=1),
@@ -51,7 +53,7 @@ class S3FDNet(nn.Module):
             nn.Conv2d(256, 256, 3, 1, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2, ceil_mode=True),
-            
+
             nn.Conv2d(256, 512, 3, 1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(512, 512, 3, 1, padding=1),
@@ -84,7 +86,7 @@ class S3FDNet(nn.Module):
             nn.Conv2d(512, 128, 1, 1),
             nn.Conv2d(128, 256, 3, 2, padding=1),
         ])
-        
+
         self.loc = nn.ModuleList([
             nn.Conv2d(256, 4, 3, 1, padding=1),
             nn.Conv2d(512, 4, 3, 1, padding=1),
@@ -106,6 +108,7 @@ class S3FDNet(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
         self.detect = Detect()
 
+    @torch.compile()
     def forward(self, x):
         size = x.size()[2:]
         sources = list()
@@ -130,7 +133,7 @@ class S3FDNet(nn.Module):
         for k in range(30, len(self.vgg)):
             x = self.vgg[k](x)
         sources.append(x)
-        
+
         # apply extra layers and cache source layer outputs
         for k, v in enumerate(self.extras):
             x = F.relu(v(x), inplace=True)

@@ -20,6 +20,7 @@ from .videomaev2_finetune import (
 
 from .videomaev2_finetune import trunc_normal_ as __call_trunc_normal_
 
+
 def trunc_normal_(tensor, mean=0., std=1.):
     __call_trunc_normal_(tensor, mean=mean, std=std, a=-std, b=std)
 
@@ -137,6 +138,7 @@ class PretrainVisionTransformerEncoder(nn.Module):
         x_vis = self.norm(x_vis)
         return x_vis
 
+    @torch.compile()
     def forward(self, x, mask):
         x = self.forward_features(x, mask)
         x = self.head(x)
@@ -219,6 +221,7 @@ class PretrainVisionTransformerDecoder(nn.Module):
         self.head = nn.Linear(
             self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+    @torch.compile()
     def forward(self, x, return_token_num):
         for blk in self.blocks:
             if self.with_cp:
@@ -336,6 +339,7 @@ class PretrainVisionTransformer(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token', 'mask_token'}
 
+    @torch.compile()
     def forward(self, x, mask, decode_mask=None):
         decode_vis = mask if decode_mask is None else ~decode_mask
 

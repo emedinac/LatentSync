@@ -31,6 +31,7 @@ class HyperNet(nn.Module):
         For size match, input args must satisfy: 'target_fc(i)_size * target_fc(i+1)_size' is divisible by 'feature_size ^ 2'.
 
     """
+
     def __init__(self, lda_out_channels, hyper_in_channels, target_in_size, target_fc1_size, target_fc2_size, target_fc3_size, target_fc4_size, feature_size):
         super(HyperNet, self).__init__()
 
@@ -42,7 +43,8 @@ class HyperNet(nn.Module):
         self.f4 = target_fc4_size
         self.feature_size = feature_size
 
-        self.res = resnet50_backbone(lda_out_channels, target_in_size, pretrained=True)
+        self.res = resnet50_backbone(
+            lda_out_channels, target_in_size, pretrained=True)
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -57,16 +59,20 @@ class HyperNet(nn.Module):
         )
 
         # Hyper network part, conv for generating target fc weights, fc for generating target fc biases
-        self.fc1w_conv = nn.Conv2d(self.hyperInChn, int(self.target_in_size * self.f1 / feature_size ** 2), 3,  padding=(1, 1))
+        self.fc1w_conv = nn.Conv2d(self.hyperInChn, int(
+            self.target_in_size * self.f1 / feature_size ** 2), 3,  padding=(1, 1))
         self.fc1b_fc = nn.Linear(self.hyperInChn, self.f1)
 
-        self.fc2w_conv = nn.Conv2d(self.hyperInChn, int(self.f1 * self.f2 / feature_size ** 2), 3, padding=(1, 1))
+        self.fc2w_conv = nn.Conv2d(self.hyperInChn, int(
+            self.f1 * self.f2 / feature_size ** 2), 3, padding=(1, 1))
         self.fc2b_fc = nn.Linear(self.hyperInChn, self.f2)
 
-        self.fc3w_conv = nn.Conv2d(self.hyperInChn, int(self.f2 * self.f3 / feature_size ** 2), 3, padding=(1, 1))
+        self.fc3w_conv = nn.Conv2d(self.hyperInChn, int(
+            self.f2 * self.f3 / feature_size ** 2), 3, padding=(1, 1))
         self.fc3b_fc = nn.Linear(self.hyperInChn, self.f3)
 
-        self.fc4w_conv = nn.Conv2d(self.hyperInChn, int(self.f3 * self.f4 / feature_size ** 2), 3, padding=(1, 1))
+        self.fc4w_conv = nn.Conv2d(self.hyperInChn, int(
+            self.f3 * self.f4 / feature_size ** 2), 3, padding=(1, 1))
         self.fc4b_fc = nn.Linear(self.hyperInChn, self.f4)
 
         self.fc5w_fc = nn.Linear(self.hyperInChn, self.f4)
@@ -77,32 +83,45 @@ class HyperNet(nn.Module):
             if i > 2:
                 nn.init.kaiming_normal_(self._modules[m_name].weight.data)
 
+    @torch.compile()
     def forward(self, img):
         feature_size = self.feature_size
 
         res_out = self.res(img)
 
         # input vector for target net
-        target_in_vec = res_out['target_in_vec'].reshape(-1, self.target_in_size, 1, 1)
+        target_in_vec = res_out['target_in_vec'].reshape(
+            -1, self.target_in_size, 1, 1)
 
         # input features for hyper net
-        hyper_in_feat = self.conv1(res_out['hyper_in_feat']).reshape(-1, self.hyperInChn, feature_size, feature_size)
+        hyper_in_feat = self.conv1(
+            res_out['hyper_in_feat']).reshape(-1, self.hyperInChn, feature_size, feature_size)
 
         # generating target net weights & biases
-        target_fc1w = self.fc1w_conv(hyper_in_feat).reshape(-1, self.f1, self.target_in_size, 1, 1)
-        target_fc1b = self.fc1b_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f1)
+        target_fc1w = self.fc1w_conv(
+            hyper_in_feat).reshape(-1, self.f1, self.target_in_size, 1, 1)
+        target_fc1b = self.fc1b_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f1)
 
-        target_fc2w = self.fc2w_conv(hyper_in_feat).reshape(-1, self.f2, self.f1, 1, 1)
-        target_fc2b = self.fc2b_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f2)
+        target_fc2w = self.fc2w_conv(
+            hyper_in_feat).reshape(-1, self.f2, self.f1, 1, 1)
+        target_fc2b = self.fc2b_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f2)
 
-        target_fc3w = self.fc3w_conv(hyper_in_feat).reshape(-1, self.f3, self.f2, 1, 1)
-        target_fc3b = self.fc3b_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f3)
+        target_fc3w = self.fc3w_conv(
+            hyper_in_feat).reshape(-1, self.f3, self.f2, 1, 1)
+        target_fc3b = self.fc3b_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f3)
 
-        target_fc4w = self.fc4w_conv(hyper_in_feat).reshape(-1, self.f4, self.f3, 1, 1)
-        target_fc4b = self.fc4b_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f4)
+        target_fc4w = self.fc4w_conv(
+            hyper_in_feat).reshape(-1, self.f4, self.f3, 1, 1)
+        target_fc4b = self.fc4b_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, self.f4)
 
-        target_fc5w = self.fc5w_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, 1, self.f4, 1, 1)
-        target_fc5b = self.fc5b_fc(self.pool(hyper_in_feat).squeeze()).reshape(-1, 1)
+        target_fc5w = self.fc5w_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, 1, self.f4, 1, 1)
+        target_fc5b = self.fc5b_fc(
+            self.pool(hyper_in_feat).squeeze()).reshape(-1, 1)
 
         out = {}
         out['target_in_vec'] = target_in_vec
@@ -124,6 +143,7 @@ class TargetNet(nn.Module):
     """
     Target network for quality prediction.
     """
+
     def __init__(self, paras):
         super(TargetNet, self).__init__()
         self.l1 = nn.Sequential(
@@ -146,6 +166,7 @@ class TargetNet(nn.Module):
             TargetFC(paras['target_fc5w'], paras['target_fc5b']),
         )
 
+    @torch.compile()
     def forward(self, x):
         q = self.l1(x)
         # q = F.dropout(q)
@@ -163,17 +184,22 @@ class TargetFC(nn.Module):
         Weights & biases are different for different images in a batch,
         thus here we use group convolution for calculating images in a batch with individual weights & biases.
     """
+
     def __init__(self, weight, bias):
         super(TargetFC, self).__init__()
         self.weight = weight
         self.bias = bias
 
+    @torch.compile()
     def forward(self, input_):
 
-        input_re = input_.reshape(-1, input_.shape[0] * input_.shape[1], input_.shape[2], input_.shape[3])
-        weight_re = self.weight.reshape(self.weight.shape[0] * self.weight.shape[1], self.weight.shape[2], self.weight.shape[3], self.weight.shape[4])
+        input_re = input_.reshape(-1, input_.shape[0] *
+                                  input_.shape[1], input_.shape[2], input_.shape[3])
+        weight_re = self.weight.reshape(
+            self.weight.shape[0] * self.weight.shape[1], self.weight.shape[2], self.weight.shape[3], self.weight.shape[4])
         bias_re = self.bias.reshape(self.bias.shape[0] * self.bias.shape[1])
-        out = F.conv2d(input=input_re, weight=weight_re, bias=bias_re, groups=self.weight.shape[0])
+        out = F.conv2d(input=input_re, weight=weight_re,
+                       bias=bias_re, groups=self.weight.shape[0])
 
         return out.reshape(input_.shape[0], self.weight.shape[1], input_.shape[2], input_.shape[3])
 
@@ -194,6 +220,7 @@ class Bottleneck(nn.Module):
         self.downsample = downsample
         self.stride = stride
 
+    @torch.compile()
     def forward(self, x):
         residual = x
 
@@ -222,7 +249,8 @@ class ResNetBackbone(nn.Module):
     def __init__(self, lda_out_channels, in_chn, block, layers, num_classes=1000):
         super(ResNetBackbone, self).__init__()
         self.inplanes = 64
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7,
+                               stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -245,7 +273,8 @@ class ResNetBackbone(nn.Module):
         self.lda2_fc = nn.Linear(32 * 16, lda_out_channels)
 
         self.lda3_pool = nn.Sequential(
-            nn.Conv2d(1024, 64, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.Conv2d(1024, 64, kernel_size=1,
+                      stride=1, padding=0, bias=False),
             nn.AvgPool2d(7, stride=7),
         )
         self.lda3_fc = nn.Linear(64 * 4, lda_out_channels)
@@ -287,6 +316,7 @@ class ResNetBackbone(nn.Module):
 
         return nn.Sequential(*layers)
 
+    @torch.compile()
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -318,11 +348,13 @@ def resnet50_backbone(lda_out_channels, in_chn, pretrained=False, **kwargs):
     Args:
         pretrained (bool): If True, returns a model_hyper pre-trained on ImageNet
     """
-    model = ResNetBackbone(lda_out_channels, in_chn, Bottleneck, [3, 4, 6, 3], **kwargs)
+    model = ResNetBackbone(lda_out_channels, in_chn,
+                           Bottleneck, [3, 4, 6, 3], **kwargs)
     if pretrained:
         save_model = model_zoo.load_url(model_urls['resnet50'])
         model_dict = model.state_dict()
-        state_dict = {k: v for k, v in save_model.items() if k in model_dict.keys()}
+        state_dict = {k: v for k, v in save_model.items()
+                      if k in model_dict.keys()}
         model_dict.update(state_dict)
         model.load_state_dict(model_dict)
     else:

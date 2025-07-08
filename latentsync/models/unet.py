@@ -6,7 +6,6 @@ import copy
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models import ModelMixin
@@ -29,6 +28,9 @@ from .utils import zero_module
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+# must be added to avoid torch dynamo error
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.recompile_limit = 100
 
 
 @dataclass
@@ -55,7 +57,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             "DownBlock3D",
         ),
         mid_block_type: str = "UNetMidBlock3DCrossAttn",
-        up_block_types: Tuple[str] = ("UpBlock3D", "CrossAttnUpBlock3D", "CrossAttnUpBlock3D", "CrossAttnUpBlock3D"),
+        up_block_types: Tuple[str] = (
+            "UpBlock3D", "CrossAttnUpBlock3D", "CrossAttnUpBlock3D", "CrossAttnUpBlock3D"),
         only_cross_attention: Union[bool, Tuple[bool]] = False,
         block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
         layers_per_block: int = 2,
@@ -89,19 +92,24 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.use_motion_module = use_motion_module
         self.add_audio_layer = add_audio_layer
 
-        self.conv_in = zero_module(InflatedConv3d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1)))
+        self.conv_in = zero_module(InflatedConv3d(
+            in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1)))
 
         # time
-        self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
+        self.time_proj = Timesteps(
+            block_out_channels[0], flip_sin_to_cos, freq_shift)
         timestep_input_dim = block_out_channels[0]
 
-        self.time_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim)
+        self.time_embedding = TimestepEmbedding(
+            timestep_input_dim, time_embed_dim)
 
         # class embedding
         if class_embed_type is None and num_class_embeds is not None:
-            self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
+            self.class_embedding = nn.Embedding(
+                num_class_embeds, time_embed_dim)
         elif class_embed_type == "timestep":
-            self.class_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim)
+            self.class_embedding = TimestepEmbedding(
+                timestep_input_dim, time_embed_dim)
         elif class_embed_type == "identity":
             self.class_embedding = nn.Identity(time_embed_dim, time_embed_dim)
         else:
@@ -112,7 +120,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.up_blocks = nn.ModuleList([])
 
         if isinstance(only_cross_attention, bool):
-            only_cross_attention = [only_cross_attention] * len(down_block_types)
+            only_cross_attention = [
+                only_cross_attention] * len(down_block_types)
 
         if isinstance(attention_head_dim, int):
             attention_head_dim = (attention_head_dim,) * len(down_block_types)
@@ -191,7 +200,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
-            input_channel = reversed_block_out_channels[min(i + 1, len(block_out_channels) - 1)]
+            input_channel = reversed_block_out_channels[min(
+                i + 1, len(block_out_channels) - 1)]
 
             # add upsample block for all BUT final layer
             if not is_final_block:
@@ -219,7 +229,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 upcast_attention=upcast_attention,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 use_inflated_groupnorm=use_inflated_groupnorm,
-                use_motion_module=use_motion_module and (res in motion_module_resolutions),
+                use_motion_module=use_motion_module and (
+                    res in motion_module_resolutions),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
                 add_audio_layer=add_audio_layer,
@@ -238,7 +249,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             )
         self.conv_act = nn.SiLU()
 
-        self.conv_out = zero_module(InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1))
+        self.conv_out = zero_module(InflatedConv3d(
+            block_out_channels[0], out_channels, kernel_size=3, padding=1))
 
     def set_attention_slice(self, slice_size):
         r"""
@@ -277,7 +289,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             # make smallest slice possible
             slice_size = num_slicable_layers * [1]
 
-        slice_size = num_slicable_layers * [slice_size] if not isinstance(slice_size, list) else slice_size
+        slice_size = num_slicable_layers * \
+            [slice_size] if not isinstance(slice_size, list) else slice_size
 
         if len(slice_size) != len(sliceable_head_dims):
             raise ValueError(
@@ -289,7 +302,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             size = slice_size[i]
             dim = sliceable_head_dims[i]
             if size is not None and size > dim:
-                raise ValueError(f"size {size} has to be smaller or equal to {dim}.")
+                raise ValueError(
+                    f"size {size} has to be smaller or equal to {dim}.")
 
         # Recursively walk through all the children.
         # Any children which exposes the set_attention_slice method
@@ -346,7 +360,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         upsample_size = None
 
         if any(s % default_overall_up_factor != 0 for s in sample.shape[-2:]):
-            logger.info("Forward upsample size to force interpolation output size.")
+            logger.info(
+                "Forward upsample size to force interpolation output size.")
             forward_upsample_size = True
 
         # prepare attention_mask
@@ -367,7 +382,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 dtype = torch.float32 if is_mps else torch.float64
             else:
                 dtype = torch.int32 if is_mps else torch.int64
-            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
+            timesteps = torch.tensor(
+                [timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
 
@@ -384,7 +400,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         if self.class_embedding is not None:
             if class_labels is None:
-                raise ValueError("class_labels should be provided when num_class_embeds > 0")
+                raise ValueError(
+                    "class_labels should be provided when num_class_embeds > 0")
 
             if self.config.class_embed_type == "timestep":
                 class_labels = self.time_proj(class_labels)
@@ -417,8 +434,10 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         if down_block_additional_residuals is not None:
             for i, down_block_additional_residual in enumerate(down_block_additional_residuals):
                 if down_block_additional_residual.dim() == 4:  # boardcast
-                    down_block_additional_residual = down_block_additional_residual.unsqueeze(2)
-                down_block_res_samples[i] = down_block_res_samples[i] + down_block_additional_residual
+                    down_block_additional_residual = down_block_additional_residual.unsqueeze(
+                        2)
+                down_block_res_samples[i] = down_block_res_samples[i] + \
+                    down_block_additional_residual
 
         # mid
         sample = self.mid_block(
@@ -428,15 +447,17 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         # support controlnet
         if mid_block_additional_residual is not None:
             if mid_block_additional_residual.dim() == 4:  # boardcast
-                mid_block_additional_residual = mid_block_additional_residual.unsqueeze(2)
+                mid_block_additional_residual = mid_block_additional_residual.unsqueeze(
+                    2)
             sample = sample + mid_block_additional_residual
 
         # up
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
 
-            res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+            res_samples = down_block_res_samples[-len(upsample_block.resnets):]
+            down_block_res_samples = down_block_res_samples[: -len(
+                upsample_block.resnets)]
 
             # if we have not reached the final block and need to forward the
             # upsample size, we do it here
@@ -497,9 +518,11 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         unet = cls.from_config(model_config).to(device)
         if ckpt_path != "":
             zero_rank_log(logger, f"Load from checkpoint: {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+            ckpt = torch.load(ckpt_path, map_location=device,
+                              weights_only=True)
             if "global_step" in ckpt:
-                zero_rank_log(logger, f"resume from global_step: {ckpt['global_step']}")
+                zero_rank_log(
+                    logger, f"resume from global_step: {ckpt['global_step']}")
                 resume_global_step = ckpt["global_step"]
             else:
                 resume_global_step = 0

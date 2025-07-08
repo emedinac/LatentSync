@@ -27,14 +27,19 @@ class ModelDimensions:
 
 
 class LayerNorm(nn.LayerNorm):
+
+    @torch.compile()
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x.float()).type(x.dtype)
 
 
 class Linear(nn.Linear):
+
+    @torch.compile()
     def forward(self, x: Tensor) -> Tensor:
         return F.linear(
-            x, self.weight.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype)
+            x, self.weight.to(
+                x.dtype), None if self.bias is None else self.bias.to(x.dtype)
         )
 
 
@@ -49,8 +54,10 @@ def sinusoids(length, channels, max_timescale=10000):
     """Returns sinusoids for positional embedding"""
     assert channels % 2 == 0
     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
-    scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+    inv_timescales = torch.exp(-log_timescale_increment *
+                               torch.arange(channels // 2))
+    scaled_time = torch.arange(
+        length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
     return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
 
@@ -63,6 +70,7 @@ class MultiHeadAttention(nn.Module):
         self.value = Linear(n_state, n_state)
         self.out = Linear(n_state, n_state)
 
+    @torch.compile()
     def forward(
         self,
         x: Tensor,
@@ -107,13 +115,16 @@ class ResidualAttentionBlock(nn.Module):
         self.attn = MultiHeadAttention(n_state, n_head)
         self.attn_ln = LayerNorm(n_state)
 
-        self.cross_attn = MultiHeadAttention(n_state, n_head) if cross_attention else None
+        self.cross_attn = MultiHeadAttention(
+            n_state, n_head) if cross_attention else None
         self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
 
         n_mlp = n_state * 4
-        self.mlp = nn.Sequential(Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state))
+        self.mlp = nn.Sequential(
+            Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state))
         self.mlp_ln = LayerNorm(n_state)
 
+    @torch.compile()
     def forward(
         self,
         x: Tensor,
@@ -123,7 +134,8 @@ class ResidualAttentionBlock(nn.Module):
     ):
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)
         if self.cross_attn:
-            x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)
+            x = x + self.cross_attn(self.cross_attn_ln(x),
+                                    xa, kv_cache=kv_cache)
         x = x + self.mlp(self.mlp_ln(x))
         return x
 
@@ -132,7 +144,8 @@ class AudioEncoder(nn.Module):
     def __init__(self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int):
         super().__init__()
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
-        self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
+        self.conv2 = Conv1d(n_state, n_state, kernel_size=3,
+                            stride=2, padding=1)
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
@@ -140,6 +153,7 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
+    @torch.compile()
     def forward(self, x: Tensor, include_embeddings: bool = False):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
@@ -179,13 +193,15 @@ class TextDecoder(nn.Module):
         self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
-            [ResidualAttentionBlock(n_state, n_head, cross_attention=True) for _ in range(n_layer)]
+            [ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+             for _ in range(n_layer)]
         )
         self.ln = LayerNorm(n_state)
 
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
 
+    @torch.compile()
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, include_embeddings: bool = False):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
@@ -196,7 +212,8 @@ class TextDecoder(nn.Module):
             Whether to include intermediate values in the output to this function
         """
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
-        x = self.token_embedding(x) + self.positional_embedding[offset : offset + x.shape[-1]]
+        x = self.token_embedding(
+            x) + self.positional_embedding[offset: offset + x.shape[-1]]
         x = x.to(xa.dtype)
 
         if include_embeddings:
@@ -208,7 +225,8 @@ class TextDecoder(nn.Module):
                 embeddings.append(x.cpu().detach().numpy())
 
         x = self.ln(x)
-        logits = (x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
+        logits = (
+            x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
 
         if include_embeddings:
             embeddings = np.stack(embeddings, axis=1)
@@ -242,6 +260,7 @@ class Whisper(nn.Module):
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
         return self.decoder.forward(tokens, audio_features)
 
+    @torch.compile()
     def forward(self, mel: torch.Tensor, tokens: torch.Tensor) -> Dict[str, torch.Tensor]:
         return self.decoder(tokens, self.encoder(mel))
 
@@ -272,9 +291,11 @@ class Whisper(nn.Module):
 
         def save_to_cache(module, _, output):
             if module not in cache or output.shape[1] > self.decoder.positional_embedding.shape[0]:
-                cache[module] = output  # save as-is, for the first token or cross attention
+                # save as-is, for the first token or cross attention
+                cache[module] = output
             else:
-                cache[module] = torch.cat([cache[module], output], dim=1).detach()
+                cache[module] = torch.cat(
+                    [cache[module], output], dim=1).detach()
             return cache[module]
 
         def install_hooks(layer: nn.Module):

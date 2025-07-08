@@ -48,12 +48,15 @@ class StableSyncNet(nn.Module):
 
         self.eval()
 
+    @torch.compile()
     def forward(self, image_sequences, audio_sequences):
         vision_embeds = self.visual_encoder(image_sequences)  # (b, c, 1, 1)
         audio_embeds = self.audio_encoder(audio_sequences)  # (b, c, 1, 1)
 
-        vision_embeds = vision_embeds.reshape(vision_embeds.shape[0], -1)  # (b, c)
-        audio_embeds = audio_embeds.reshape(audio_embeds.shape[0], -1)  # (b, c)
+        vision_embeds = vision_embeds.reshape(
+            vision_embeds.shape[0], -1)  # (b, c)
+        audio_embeds = audio_embeds.reshape(
+            audio_embeds.shape[0], -1)  # (b, c)
 
         # Make them unit vectors
         vision_embeds = F.normalize(vision_embeds, p=2, dim=1)
@@ -75,12 +78,16 @@ class ResnetBlock2D(nn.Module):
     ):
         super().__init__()
 
-        self.norm1 = nn.GroupNorm(num_groups=norm_num_groups, num_channels=in_channels, eps=eps, affine=True)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.norm1 = nn.GroupNorm(
+            num_groups=norm_num_groups, num_channels=in_channels, eps=eps, affine=True)
+        self.conv1 = nn.Conv2d(in_channels, out_channels,
+                               kernel_size=3, stride=1, padding=1)
 
-        self.norm2 = nn.GroupNorm(num_groups=norm_num_groups, num_channels=out_channels, eps=eps, affine=True)
+        self.norm2 = nn.GroupNorm(
+            num_groups=norm_num_groups, num_channels=out_channels, eps=eps, affine=True)
         self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, stride=1, padding=1)
 
         if act_fn == "relu":
             self.act_fn = nn.ReLU()
@@ -88,7 +95,8 @@ class ResnetBlock2D(nn.Module):
             self.act_fn = nn.SiLU()
 
         if in_channels != out_channels:
-            self.conv_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+            self.conv_shortcut = nn.Conv2d(
+                in_channels, out_channels, kernel_size=1, stride=1, padding=0)
         else:
             self.conv_shortcut = None
 
@@ -104,10 +112,12 @@ class ResnetBlock2D(nn.Module):
             self.pad = (0, 1, 0, 1)
             if isinstance(downsample_factor, tuple):
                 if downsample_factor[0] == 1:
-                    self.pad = (0, 1, 1, 1)  # The padding order is from back to front
+                    # The padding order is from back to front
+                    self.pad = (0, 1, 1, 1)
                 elif downsample_factor[1] == 1:
                     self.pad = (1, 1, 0, 1)
 
+    @torch.compile()
     def forward(self, input_tensor):
         hidden_states = input_tensor
 
@@ -127,7 +137,8 @@ class ResnetBlock2D(nn.Module):
         hidden_states += input_tensor
 
         if self.downsample_conv is not None:
-            hidden_states = F.pad(hidden_states, self.pad, mode="constant", value=0)
+            hidden_states = F.pad(hidden_states, self.pad,
+                                  mode="constant", value=0)
             hidden_states = self.downsample_conv(hidden_states)
 
         return hidden_states
@@ -136,19 +147,26 @@ class ResnetBlock2D(nn.Module):
 class AttentionBlock2D(nn.Module):
     def __init__(self, query_dim, norm_num_groups=32, dropout=0.0):
         super().__init__()
-        self.norm1 = torch.nn.GroupNorm(num_groups=norm_num_groups, num_channels=query_dim, eps=1e-6, affine=True)
+        self.norm1 = torch.nn.GroupNorm(
+            num_groups=norm_num_groups, num_channels=query_dim, eps=1e-6, affine=True)
         self.norm2 = nn.LayerNorm(query_dim)
         self.norm3 = nn.LayerNorm(query_dim)
 
-        self.ff = FeedForward(query_dim, dropout=dropout, activation_fn="geglu")
+        self.ff = FeedForward(query_dim, dropout=dropout,
+                              activation_fn="geglu")
 
-        self.conv_in = nn.Conv2d(query_dim, query_dim, kernel_size=1, stride=1, padding=0)
-        self.conv_out = nn.Conv2d(query_dim, query_dim, kernel_size=1, stride=1, padding=0)
+        self.conv_in = nn.Conv2d(query_dim, query_dim,
+                                 kernel_size=1, stride=1, padding=0)
+        self.conv_out = nn.Conv2d(
+            query_dim, query_dim, kernel_size=1, stride=1, padding=0)
 
-        self.attn = Attention(query_dim=query_dim, heads=8, dim_head=query_dim // 8, dropout=dropout, bias=True)
+        self.attn = Attention(query_dim=query_dim, heads=8,
+                              dim_head=query_dim // 8, dropout=dropout, bias=True)
 
+    @torch.compile()
     def forward(self, hidden_states):
-        assert hidden_states.dim() == 4, f"Expected hidden_states to have ndim=4, but got ndim={hidden_states.dim()}."
+        assert hidden_states.dim(
+        ) == 4, f"Expected hidden_states to have ndim=4, but got ndim={hidden_states.dim()}."
 
         batch, channel, height, width = hidden_states.shape
         residual = hidden_states
@@ -159,10 +177,12 @@ class AttentionBlock2D(nn.Module):
 
         norm_hidden_states = self.norm2(hidden_states)
 
-        hidden_states = self.attn(norm_hidden_states, attention_mask=None) + hidden_states
+        hidden_states = self.attn(
+            norm_hidden_states, attention_mask=None) + hidden_states
         hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
 
-        hidden_states = rearrange(hidden_states, "b (h w) c -> b c h w", h=height, w=width).contiguous()
+        hidden_states = rearrange(
+            hidden_states, "b (h w) c -> b c h w", h=height, w=width).contiguous()
         hidden_states = self.conv_out(hidden_states)
 
         hidden_states = hidden_states + residual
@@ -187,7 +207,8 @@ class DownEncoder2D(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
 
         # in
-        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, stride=1, padding=1)
+        self.conv_in = nn.Conv2d(
+            in_channels, block_out_channels[0], kernel_size=3, stride=1, padding=1)
 
         # down
         self.down_blocks = nn.ModuleList([])
@@ -209,20 +230,24 @@ class DownEncoder2D(nn.Module):
             self.down_blocks.append(down_block)
 
             if attn_blocks[i] == 1:
-                attention_block = AttentionBlock2D(query_dim=output_channels, dropout=dropout)
+                attention_block = AttentionBlock2D(
+                    query_dim=output_channels, dropout=dropout)
                 self.down_blocks.append(attention_block)
 
         # out
-        self.norm_out = nn.GroupNorm(num_channels=block_out_channels[-1], num_groups=norm_num_groups, eps=1e-6)
+        self.norm_out = nn.GroupNorm(
+            num_channels=block_out_channels[-1], num_groups=norm_num_groups, eps=1e-6)
         self.act_fn_out = nn.ReLU()
 
+    @torch.compile()
     def forward(self, hidden_states):
         hidden_states = self.conv_in(hidden_states)
 
         # down
         for down_block in self.down_blocks:
             if self.gradient_checkpointing:
-                hidden_states = torch.utils.checkpoint.checkpoint(down_block, hidden_states, use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    down_block, hidden_states, use_reentrant=False)
             else:
                 hidden_states = down_block(hidden_states)
 
