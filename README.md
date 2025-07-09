@@ -12,3 +12,6 @@
 
 ## Unofficial (fork) implementation of LatentSync
 [![original repo](https://github.com/bytedance/LatentSync/)
+
+Optimizations were applied to with `.compile()` and version updates for Pytroch and other cuda-based libs.
+Using Pytorch profiler. The full execution (CUDA) time improved from 420 secs to 397 secs.
