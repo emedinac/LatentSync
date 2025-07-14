@@ -172,6 +172,7 @@ class UNetDataset(Dataset):
                 if "vr" in locals():
                     vr.seek(0)  # avoid memory leak
         
+        gt_flow_values = None # pipeline test 
         sample = dict(
             gt_pixel_values=gt_pixel_values,
             gt_flow_values=gt_flow_values,
