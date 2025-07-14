@@ -287,17 +287,20 @@ def main(config):
 
             # Convert videos to latent space
             gt_pixel_values = batch["gt_pixel_values"].to(device, dtype=torch.float16)
+            gt_flow_values = batch["gt_flow_values"].to(device, dtype=torch.float16)
             masked_pixel_values = batch["masked_pixel_values"].to(device, dtype=torch.float16)
             masks = batch["masks"].to(device, dtype=torch.float16)
             ref_pixel_values = batch["ref_pixel_values"].to(device, dtype=torch.float16)
 
             gt_pixel_values = rearrange(gt_pixel_values, "b f c h w -> (b f) c h w")
+            gt_flow_values = rearrange(gt_flow_values, "b f c h w -> (b f) c h w")
             masked_pixel_values = rearrange(masked_pixel_values, "b f c h w -> (b f) c h w")
             masks = rearrange(masks, "b f c h w -> (b f) c h w")
             ref_pixel_values = rearrange(ref_pixel_values, "b f c h w -> (b f) c h w")
 
             with torch.no_grad():
                 gt_latents = vae.encode(gt_pixel_values).latent_dist.sample()
+                flow_latents = vae.encode(gt_flow_values).latent_dist.sample()
                 masked_latents = vae.encode(masked_pixel_values).latent_dist.sample()
                 ref_latents = vae.encode(ref_pixel_values).latent_dist.sample()
 
@@ -305,6 +308,9 @@ def main(config):
 
             gt_latents = (
                 rearrange(gt_latents, "(b f) c h w -> b c f h w", f=config.data.num_frames) - vae.config.shift_factor
+            ) * vae.config.scaling_factor
+            flow_latents = (
+                rearrange(flow_latents, "(b f) c h w -> b c f h w", f=config.data.num_frames) - vae.config.shift_factor
             ) * vae.config.scaling_factor
             masked_latents = (
                 rearrange(masked_latents, "(b f) c h w -> b c f h w", f=config.data.num_frames)
@@ -340,6 +346,7 @@ def main(config):
             # Add noise to the latents according to the noise magnitude at each timestep
             # (this is the forward diffusion process)
             noisy_gt_latents = noise_scheduler.add_noise(gt_latents, noise, timesteps)
+            noisy_flow_latents = noise_scheduler.add_noise(flow_latents, noise, timesteps)
 
             # Get the target for loss depending on the prediction type
             if noise_scheduler.config.prediction_type == "epsilon":
@@ -349,14 +356,14 @@ def main(config):
             else:
                 raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-            unet_input = torch.cat([noisy_gt_latents, masks, masked_latents, ref_latents], dim=1)
+            unet_input = torch.cat([noisy_gt_latents, noisy_flow_latents, masks, masked_latents, ref_latents], dim=1)
 
             # Predict the noise and compute loss
             # Mixed-precision training
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.run.mixed_precision_training):
                 pred_noise = unet(unet_input, timesteps, encoder_hidden_states=audio_embeds).sample
 
-            if config.run.recon_loss_weight != 0:
+            if config.run.recon_loss_weight != 0: # further improvement the loss can be separeted for results interpretability
                 recon_loss = F.mse_loss(pred_noise.float(), target.float(), reduction="mean")
             else:
                 recon_loss = 0
