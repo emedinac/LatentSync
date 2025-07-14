@@ -26,6 +26,39 @@ import torch.nn.functional as F
 from pathlib import Path
 
 
+def compute_optical_flow(frame_t, frame_t1):
+    """
+    Compute optical flow between two frames.
+    Returns flow tensor of shape [B, 3, H, W] with vx, vy, and flow magnitude.
+    Coudl be improve using JAX lib to reduce the loop overhead or simply Pytorch tensor operations.
+    Args:
+        frame_t: Tensor of shape [B, C, H, W] for the first frame.
+        frame_t1: Tensor of shape [B, C, H, W] for the second frame.
+    Returns:
+        flow_tensor: Tensor of shape [B, 3, H, W] containing vx, vy, and flow magnitude.
+    """
+    flows = []
+    for b in range(frame_t.shape[0]):
+        # [H, W, C] Tradeoff between conver the full tensor (saved in memory) vs each batch element (processing time)
+        # Convert to numpy and grayscale
+        img1 = frame_t[b].detach().cpu().numpy().transpose(1, 2, 0)
+        img2 = frame_t1[b].detach().cpu().numpy().transpose(1, 2, 0)
+        img1_gray = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+        img2_gray = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+        # Compute flow (vx, vy)
+        flow = cv2.calcOpticalFlowFarneback(img1_gray, img2_gray,
+                                            None, 0.5, 3, 15, 3, 5, 1.2, 0
+                                            )  # [H, W, 2]
+        # This format: vx, vy = flow[..., 0], flow[..., 1]
+        mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+
+        # Stack into 3 channels  # [3, H, W]
+        flow_combined = np.stack([flow[..., 0], flow[..., 1], mag], axis=0)
+        flows.append(torch.from_numpy(flow_combined))
+
+    flow_tensor = torch.stack(flows).to(frame_t.device)  # [B, 3, H, W]
+    return flow_tensor
+
 class UNetDataset(Dataset):
     def __init__(self, train_data_dir: str, config):
         if config.data.train_fileslist != "":
@@ -138,9 +171,10 @@ class UNetDataset(Dataset):
                 print(f"{type(e).__name__} - {e} - {video_path}")
                 if "vr" in locals():
                     vr.seek(0)  # avoid memory leak
-
+        
         sample = dict(
             gt_pixel_values=gt_pixel_values,
+            gt_flow_values=gt_flow_values,
             masked_pixel_values=masked_pixel_values,
             ref_pixel_values=ref_pixel_values,
             mel=mel,
