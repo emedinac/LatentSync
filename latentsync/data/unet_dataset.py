@@ -26,38 +26,41 @@ import torch.nn.functional as F
 from pathlib import Path
 
 
-def compute_optical_flow(frame_t, frame_t1):
+def compute_optical_flow_sequence(video):
     """
-    Compute optical flow between two frames.
-    Returns flow tensor of shape [B, 3, H, W] with vx, vy, and flow magnitude.
+    Compute optical flow in a video.
+    Returns flow tensor of shape [Frames, 3, H, W] with vx, vy, and flow magnitude.
     Coudl be improve using JAX lib to reduce the loop overhead or simply Pytorch tensor operations.
     Args:
-        frame_t: Tensor of shape [B, C, H, W] for the first frame.
-        frame_t1: Tensor of shape [B, C, H, W] for the second frame.
+        video: Tensor of shape [Frames, C, H, W] for the frame.
     Returns:
-        flow_tensor: Tensor of shape [B, 3, H, W] containing vx, vy, and flow magnitude.
+        flow_tensor: Tensor of shape [Frames, 3, H, W] containing vx, vy, and flow magnitude.
     """
+    F, _, H, W = video.shape
     flows = []
-    for b in range(frame_t.shape[0]):
-        # [H, W, C] Tradeoff between conver the full tensor (saved in memory) vs each batch element (processing time)
-        # Convert to numpy and grayscale
-        img1 = frame_t[b].detach().cpu().numpy().transpose(1, 2, 0)
-        img2 = frame_t1[b].detach().cpu().numpy().transpose(1, 2, 0)
-        img1_gray = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
-        img2_gray = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
-        # Compute flow (vx, vy)
-        flow = cv2.calcOpticalFlowFarneback(img1_gray, img2_gray,
-                                            None, 0.5, 3, 15, 3, 5, 1.2, 0
-                                            )  # [H, W, 2]
-        # This format: vx, vy = flow[..., 0], flow[..., 1]
-        mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+    frames_np = video.detach().cpu().numpy().transpose(1, 2, 0)
+    # First frame: zero because no no frames to compare
+    zero_flow = torch.zeros(3, H, W, dtype=torch.float32)
+    flows.append(zero_flow)
 
-        # Stack into 3 channels  # [3, H, W]
-        flow_combined = np.stack([flow[..., 0], flow[..., 1], mag], axis=0)
-        flows.append(torch.from_numpy(flow_combined))
-
-    flow_tensor = torch.stack(flows).to(frame_t.device)  # [B, 3, H, W]
+    for t in range(1, F):
+        frame_prev = frames_np[t - 1]  # [H, W, C]
+        frame_curr = frames_np[t]
+        prev_gray = cv2.cvtColor(frame_prev, cv2.COLOR_RGB2GRAY)
+        curr_gray = cv2.cvtColor(frame_curr, cv2.COLOR_RGB2GRAY)
+        # Compute optical flow
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None,
+                                            pyr_scale=0.5, levels=3, winsize=15,
+                                            iterations=3, poly_n=5, 
+                                            poly_sigma=1.2, flags=0
+        )
+        # 2 dims: vx, vy = flow[..., 0], flow[..., 1]
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        flow = np.stack([flow[..., 0], flow[..., 1], mag], axis=0)  # [3, H, W]
+        flows.append(torch.from_numpy(flow))
+    flow_tensor = torch.stack(flows).to(dtype=torch.float32)  # [F, 3, H, W]
     return flow_tensor
+
 
 class UNetDataset(Dataset):
     def __init__(self, train_data_dir: str, config):
