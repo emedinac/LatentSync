@@ -364,7 +364,14 @@ def main(config):
                 pred_noise = unet(unet_input, timesteps, encoder_hidden_states=audio_embeds).sample
 
             if config.run.recon_loss_weight != 0: # further improvement the loss can be separeted for results interpretability
-                recon_loss = F.mse_loss(pred_noise.float(), target.float(), reduction="mean")
+                recon_loss1 = F.mse_loss(pred_noise[:, :4].float(), target.float(), reduction="mean")
+                recon_loss2 = F.mse_loss(pred_noise[:, 4:].float(), flow.float(), reduction="mean")
+                # The paper doesn't mention that lambda usage but may help to control the loss impact.
+                # https://hila-chefer.github.io/videojam-paper.github.io/VideoJAM_arxiv.pdf
+                # We could experiment with the other losses too.
+                lamba_1 = 0.5
+                lamba_2 = 0.5
+                recon_loss = recon_loss1*lamba_1 + recon_loss2*lamba_2
             else:
                 recon_loss = 0
 
