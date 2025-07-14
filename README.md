@@ -11,7 +11,17 @@
 </div>
 
 ## Unofficial (fork) implementation of LatentSync
-[![original repo](https://github.com/bytedance/LatentSync/)
+[original repo](https://github.com/bytedance/LatentSync/)
 
 Optimizations were applied to with `.compile()` and version updates for Pytroch and other cuda-based libs.
 Using Pytorch profiler. The full execution (CUDA) time improved from 420 secs to 397 secs.
+
+A PoC implementation of optical flow was added to the loss function. This is computed per video and it was inspired from: [VideoJAM](https://hila-chefer.github.io/videojam-paper.github.io/VideoJAM_arxiv.pdf)
+
+# Download dataset
+
+To download the HDTF data. Follow instruction [link](https://github.com/universome/HDTF)
+
+```bash
+python download.py --output_dir path-to-dataset/
+```
