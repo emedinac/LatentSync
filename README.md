@@ -25,3 +25,9 @@ To download the HDTF data. Follow instruction [link](https://github.com/universo
 ```bash
 python download.py --output_dir path-to-dataset/
 ```
+
+# Run
+
+```bash
+./train_unet_test.sh
+```
